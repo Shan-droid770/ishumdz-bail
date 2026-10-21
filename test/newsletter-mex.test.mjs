@@ -139,6 +139,36 @@ describe('w:mex layer', () => {
         assert.equal(resolveQueryId('METADATA', { METADATA: '99' }), '99')
     })
 
+    test('mexQueryIdOverrides applies to the numeric call pattern used by the sockets', async () => {
+        // Socket code passes QueryIds.METADATA (already the numeric id), never
+        // the string 'METADATA' — the documented { METADATA: '…' } override
+        // must still win. Regression: it used to be silently ignored.
+        let sentId
+        const query = async node => {
+            sentId = node.content[0].attrs.query_id
+            return okQuery({ data: { xwa2_newsletter: METADATA_PAYLOAD } })()
+        }
+        await executeWMexQuery({}, QueryIds.METADATA, XWAPaths.xwa2_newsletter_metadata, query, () => 'MSG', {
+            METADATA: '2222222222222222'
+        })
+        assert.equal(sentId, '2222222222222222')
+        assert.equal(resolveQueryId(QueryIds.METADATA, { METADATA: '99' }), '99')
+        assert.equal(resolveQueryId(QueryIds.METADATA, { [QueryIds.METADATA]: '98' }), '98')
+        assert.equal(resolveQueryId(QueryIds.METADATA), QueryIds.METADATA)
+    })
+
+    test('an unknown enum name fails locally instead of reaching the server as-is', async () => {
+        let called = false
+        await assert.rejects(
+            () =>
+                executeWMexQuery({}, 'METADTA', XWAPaths.xwa2_newsletter_metadata, async () => {
+                    called = true
+                }, () => 'MSG'),
+            /Missing w:mex query id/
+        )
+        assert.equal(called, false)
+    })
+
     test('a missing id fails locally instead of sending query_id:undefined', async () => {
         let called = false
         await assert.rejects(
