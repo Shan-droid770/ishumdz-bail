@@ -201,7 +201,7 @@ describe('location / gif headers', () => {
         const idx = src.lastIndexOf("else if ('gif' in message")
         assert.ok(idx > -1, "gif branch expected in generateWAMessageContent")
         const branch = src.slice(idx, idx + 600)
-        assert.match(branch, /prepareWAMessageMedia\(\{ video: message\.gif \}/)
+        assert.match(branch, /prepareWAMessageMedia\(\{ video: message\.gif, caption:/)
         assert.match(branch, /gifPlayback = true/)
         assert.match(branch, /ButtonType\.VIDEO/)
     })
@@ -459,5 +459,60 @@ describe('group auto-convert preserves native-flow buttons', () => {
         assert.match(src, /btn\.nativeFlowInfo\?\.name/)
         assert.match(src, /name: btn\.nativeFlowInfo\.name/)
         assert.match(src, /buttonParamsJson: btn\.nativeFlowInfo\.paramsJson/)
+    })
+})
+
+describe('dialect control + caption mirroring (v1.0.28)', () => {
+    const PNG = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+        'base64'
+    )
+
+    test('caption-only media send keeps its caption on the media header (was silently dropped)', async () => {
+        const m = await gen({
+            image: PNG,
+            caption: 'hello cap',
+            buttons: [{ buttonText: { displayText: 'menu' }, buttonId: 'menu', type: 1 }]
+        }, await okOptions())
+
+        assert.equal(m.buttonsMessage.imageMessage.caption, 'hello cap')
+    })
+
+    test('dialect: "classic" refuses buttons that only exist in native flow', async () => {
+        const options = await okOptions()
+        await assert.rejects(
+            () => gen({
+                text: 'x',
+                buttons: [{ buttonText: { displayText: 'open' }, url: 'https://example.com' }],
+                dialect: 'classic'
+            }, options),
+            /cannot be sent as a classic ButtonsMessage/
+        )
+    })
+
+    test('auto-upgrade to native flow is logged instead of happening silently', async () => {
+        const logs = []
+        const options = await okOptions()
+        const m = await gen({
+            text: 'x',
+            buttons: [{ buttonText: { displayText: 'open' }, url: 'https://example.com' }]
+        }, { ...options, logger: { ...FAKE_LOGGER, info: (_obj, msg) => logs.push(msg) } })
+
+        assert.ok(m.interactiveMessage, 'must upgrade to a native-flow card')
+        assert.ok(logs.some(msg => /auto-upgrading to a native-flow/.test(msg)), 'upgrade must be logged')
+    })
+
+    test('dialect: "nativeFlow" + plain quick replies warns about tappability', async () => {
+        const warns = []
+        const options = await okOptions()
+        const m = await gen({
+            text: 'x',
+            buttons: [{ buttonText: { displayText: 'hi' }, buttonId: 'hi', type: 1 }],
+            dialect: 'nativeFlow'
+        }, { ...options, logger: { ...FAKE_LOGGER, warn: (...args) => warns.push(args.join(' ')) } })
+
+        assert.ok(m.interactiveMessage)
+        assert.equal(m.interactiveMessage.nativeFlowMessage.buttons[0].name, 'quick_reply')
+        assert.ok(warns.some(msg => /not tappable on every/.test(msg)))
     })
 })
