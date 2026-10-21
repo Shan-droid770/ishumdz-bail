@@ -28,7 +28,7 @@ async function startBot() {
     const sock = makeWASocket({
         auth: state,
         syncFullHistory: false,
-        aiLabel: true
+        aiLabel: false
     })
 
     sock.ev.on('creds.update', saveCreds)

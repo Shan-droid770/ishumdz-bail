@@ -201,6 +201,10 @@ const results = await sock.newsletterSearch('technology');
 
 // List followed channels
 const channels = await sock.newsletterList();
+
+// Member/admin/owner identification (see "Members: admin & owner identification")
+const { owner, admins, members } = await sock.newsletterMemberRoles(channelJid, 100);
+await sock.newsletterMemberRole(channelJid, '123…@lid'); // 'OWNER' | 'ADMIN' | 'MEMBER'
 ```
 
 ### 🟢 Status/Stories Pro
@@ -829,8 +833,8 @@ const meta = await sock.newsletterMetadata('invite', '0029VaAbCdEf')
 const channels = await sock.newsletterSubscribed()
 const sameThing = await sock.newsletterFetchAllSubscribe()   // alias other forks use
 
-// followers of a channel
-const followers = await sock.newsletterSubscribers(channelJid, 50)
+// members (followers) of a channel — normalized records, owner/admins first
+const members = await sock.newsletterSubscribers(channelJid, 50)
 
 await sock.newsletterFollow(channelJid)
 await sock.newsletterUnfollow(channelJid)
@@ -848,6 +852,57 @@ await sock.newsletterAdminCount(channelJid)
   confirmation, instead of pretending the rename worked.
 - Errors are typed `Boom`s — a rotated id says so explicitly, with the query id
   and the override hint (no more bare `GraphQL server error: Bad Request`).
+
+### 👥 Members: admin & owner identification (v1.0.31)
+
+Who is the channel **owner**, who are the **admins**, who are plain members?
+The member list comes back with roles attached (wire shape taken from WhatsApp
+Web's `WAWebMexFetchNewsletterSubscribersJob` — `role`/`subscribe_time` on the
+edge, `id`/`pn`/`display_name` on the node):
+
+```javascript
+import { parseNewsletterMemberTier } from 'ishumdz-bail'
+
+// one call → the full identification
+const { owner, admins, members, total } = await sock.newsletterMemberRoles(channelJid, 100)
+// owner:   { id, pn, displayName, role: 'OWNER', tier: 'OWNER', subscribeTime, raw }
+// admins:  [ { …, role: 'ADMIN', tier: 'ADMIN' }, … ]
+// members: [ { …, role: 'GUEST' | 'SUBSCRIBER' | null, tier: 'MEMBER' }, … ]
+
+// identify a single member — by LID or by phone jid (device suffixes tolerated)
+await sock.newsletterMemberRole(channelJid, '123…@lid')   // 'OWNER' | 'ADMIN' | 'MEMBER' | null
+
+// the normalized list + the server's own admin count (good cross-check)
+const entries = await sock.newsletterSubscribers(channelJid, 50)
+const adminCount = await sock.newsletterAdminCount(channelJid)
+
+// your own role on the channel (viewer metadata)
+const meta = await sock.newsletterMetadata('jid', channelJid)
+const myTier = parseNewsletterMemberTier(meta.viewer_metadata?.role) // 'OWNER' | 'ADMIN' | 'MEMBER'
+```
+
+| Server `role` (edge) | `tier` | Meaning |
+|---|---|---|
+| `OWNER` (or `SUPERADMIN`) | `OWNER` | the channel owner |
+| `ADMIN` | `ADMIN` | promoted admin |
+| `GUEST`, `SUBSCRIBER`, anything else / missing | `MEMBER` | regular member |
+
+Notes & limits:
+
+- WhatsApp serves the member list only to channel **admins/owner** — the same
+  permission the official apps enforce.
+- `count` is the window size (default 20). Ask for what you need; the server
+  caps it. `newsletterMemberRole` returns `null` when the member is outside the
+  fetched window — that is not proof they are not a member.
+- Entries without an `id` are dropped (WA Web does the same), and unknown
+  payload shapes return `[]` instead of crashing (same defensive parsing as
+  metadata). `raw` on every entry keeps the untouched edge.
+- Management calls take the member's **LID** (`…@lid`), not the phone jid:
+  `newsletterChangeOwner(channelJid, lid)`, `newsletterDemote(channelJid, lid)`.
+- The pure helpers are exported from the package root too:
+  `parseNewsletterMemberTier`, `parseNewsletterSubscriber`,
+  `parseNewsletterSubscribers`, `classifyNewsletterSubscribers`,
+  `findNewsletterMember`, `parseNewsletterAdminCount`.
 
 ### Sending to a channel (`@newsletter`)
 
