@@ -203,7 +203,7 @@ const results = await sock.newsletterSearch('technology');
 const channels = await sock.newsletterList();
 
 // Member/admin/owner identification (see "Members: admin & owner identification")
-const { owner, admins, members } = await sock.newsletterMemberRoles(channelJid, 100);
+const { id, name, owner, admins, members } = await sock.newsletterMemberRoles(channelJid, 100);
 await sock.newsletterMemberRole(channelJid, '123…@lid'); // 'OWNER' | 'ADMIN' | 'MEMBER'
 ```
 
@@ -829,6 +829,10 @@ const meta = await sock.newsletterMetadata('invite', '0029VaAbCdEf')
 // { id, state, name, description, picture, preview, invite, handle,
 //   subscribers, verification, creation_time, reaction_codes, viewer_metadata }
 
+// any reference — jid | invite link | invite code → id + name together (v1.0.32)
+const channel = await sock.newsletterResolve('https://whatsapp.com/channel/0029VaAbCdEf')
+console.log(channel.id, channel.name)
+
 // everything this account follows (parsed; null / deleted entries skipped)
 const channels = await sock.newsletterSubscribed()
 const sameThing = await sock.newsletterFetchAllSubscribe()   // alias other forks use
@@ -853,21 +857,26 @@ await sock.newsletterAdminCount(channelJid)
 - Errors are typed `Boom`s — a rotated id says so explicitly, with the query id
   and the override hint (no more bare `GraphQL server error: Bad Request`).
 
-### 👥 Members: admin & owner identification (v1.0.31)
+### 👥 Members: admin & owner identification (v1.0.31+)
 
 Who is the channel **owner**, who are the **admins**, who are plain members?
 The member list comes back with roles attached (wire shape taken from WhatsApp
 Web's `WAWebMexFetchNewsletterSubscribersJob` — `role`/`subscribe_time` on the
-edge, `id`/`pn`/`display_name` on the node):
+edge, `id`/`pn`/`display_name` on the node) — and the channel **id + name are
+resolved together with the roles** (v1.0.32):
 
 ```javascript
 import { parseNewsletterMemberTier } from 'ishumdz-bail'
 
-// one call → the full identification
-const { owner, admins, members, total } = await sock.newsletterMemberRoles(channelJid, 100)
+// one call → the full identification (accepts jid, invite link, or invite code)
+const { id, name, owner, admins, members, total } = await sock.newsletterMemberRoles(channelJid, 100)
+// id/name: the channel identity, resolved together with the roles
 // owner:   { id, pn, displayName, role: 'OWNER', tier: 'OWNER', subscribeTime, raw }
 // admins:  [ { …, role: 'ADMIN', tier: 'ADMIN' }, … ]
 // members: [ { …, role: 'GUEST' | 'SUBSCRIBER' | null, tier: 'MEMBER' }, … ]
+
+// resolve any channel reference to id + name in one step
+const channel = await sock.newsletterResolve('https://whatsapp.com/channel/0029Va…')
 
 // identify a single member — by LID or by phone jid (device suffixes tolerated)
 await sock.newsletterMemberRole(channelJid, '123…@lid')   // 'OWNER' | 'ADMIN' | 'MEMBER' | null
@@ -897,12 +906,19 @@ Notes & limits:
 - Entries without an `id` are dropped (WA Web does the same), and unknown
   payload shapes return `[]` instead of crashing (same defensive parsing as
   metadata). `raw` on every entry keeps the untouched edge.
+- **Name resolution** (v1.0.32): `newsletterMemberRoles` resolves the channel
+  `name` together with the `id`. For a plain jid the name is best-effort — `null`
+  when metadata cannot be fetched, so identification keeps working; an invite
+  link/code that cannot be resolved throws (it has no id at all).
+  `newsletterResolve` is the strict one-step resolver (jid | link | code).
+  A link without a `/channel/<code>` segment (e.g. a `chat.whatsapp.com` **group**
+  invite) throws `400`, instead of confusing the server with a bogus code.
 - Management calls take the member's **LID** (`…@lid`), not the phone jid:
   `newsletterChangeOwner(channelJid, lid)`, `newsletterDemote(channelJid, lid)`.
 - The pure helpers are exported from the package root too:
   `parseNewsletterMemberTier`, `parseNewsletterSubscriber`,
   `parseNewsletterSubscribers`, `classifyNewsletterSubscribers`,
-  `findNewsletterMember`, `parseNewsletterAdminCount`.
+  `findNewsletterMember`, `parseNewsletterAdminCount`, `parseNewsletterReference`.
 
 ### Sending to a channel (`@newsletter`)
 

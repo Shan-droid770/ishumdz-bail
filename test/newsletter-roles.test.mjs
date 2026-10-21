@@ -10,7 +10,9 @@ import {
     parseNewsletterSubscribers,
     classifyNewsletterSubscribers,
     findNewsletterMember,
-    parseNewsletterAdminCount
+    parseNewsletterAdminCount,
+    parseNewsletterReference,
+    buildMemberRoles
 } from '../lib/Socket/newsletter.js'
 
 // ── fixtures ───────────────────────────────────────────────────────────────
@@ -191,5 +193,64 @@ describe('subscriber wire contract', () => {
         assert.match(src, /QueryIds\.SUBSCRIBERS/)
         assert.doesNotMatch(src, /9783111038412085/, 'the stale SUBSCRIBERS id must not return')
         assert.doesNotMatch(src, /query_id:\s*['"]\d/, 'no hardcoded query ids in the socket layer')
+    })
+})
+
+describe('channel reference resolution (id + name together)', () => {
+    test('recognises a channel jid', () => {
+        assert.deepEqual(parseNewsletterReference('120363414444444444@newsletter'), {
+            type: 'jid',
+            key: '120363414444444444@newsletter'
+        })
+    })
+
+    test('recognises invite links — query/hash stripped, /channel/<code> located', () => {
+        for (const link of [
+            'https://whatsapp.com/channel/0029VaAbCdEf',
+            'https://www.whatsapp.com/channel/0029VaAbCdEf',
+            'whatsapp.com/channel/0029VaAbCdEf',
+            'https://whatsapp.com/channel/0029VaAbCdEf?r=lc',
+            'https://whatsapp.com/channel/0029VaAbCdEf#x',
+            'https://whatsapp.com/channel/0029VaAbCdEf/'
+        ]) {
+            assert.deepEqual(parseNewsletterReference(link), { type: 'invite', key: '0029VaAbCdEf' }, link)
+        }
+    })
+
+    test('recognises a bare invite code (trimmed)', () => {
+        assert.deepEqual(parseNewsletterReference('  0029VaAbCdEf  '), { type: 'invite', key: '0029VaAbCdEf' })
+    })
+
+    test('rejects empty input and non-channel links with a 400 Boom', async () => {
+        for (const bad of ['', '   ', null, undefined, 'https://chat.whatsapp.com/GroupCodeHere', 'https://whatsapp.com/']) {
+            await assert.rejects(async () => parseNewsletterReference(bad), err => err.isBoom === true && err.output?.statusCode === 400, String(bad))
+        }
+    })
+})
+
+describe('member roles carry the channel identity', () => {
+    const classification = classifyNewsletterSubscribers(parseNewsletterSubscribers(SUBSCRIBERS_PAYLOAD))
+
+    test('resolves id and name together with the roles', () => {
+        const meta = { id: '123@newsletter', name: 'News & Updates', subscribers: 900 }
+        const roles = buildMemberRoles(classification, meta, 'fallback@newsletter')
+        assert.equal(roles.id, '123@newsletter')
+        assert.equal(roles.name, 'News & Updates')
+        assert.equal(roles.total, 6)
+        assert.equal(roles.owner.id, '111111111111111@lid')
+        assert.equal(roles.admins.length, 1)
+    })
+
+    test('falls back to the raw jid with name null when metadata failed', () => {
+        const roles = buildMemberRoles(classification, null, 'fallback@newsletter')
+        assert.equal(roles.id, 'fallback@newsletter')
+        assert.equal(roles.name, null)
+        assert.equal(roles.total, 6)
+    })
+
+    test('an empty channel name becomes null, and nothing blows up on empty input', () => {
+        assert.equal(buildMemberRoles(classification, { id: 'x@newsletter', name: '' }).name, null)
+        const empty = buildMemberRoles(null, null, null)
+        assert.deepEqual(empty, { id: null, name: null, owner: null, admins: [], members: [], total: 0 })
     })
 })
