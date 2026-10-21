@@ -59,12 +59,30 @@ import { makeWASocket, useMultiFileAuthState } from 'ishumdz-bail'
 const { state, saveCreds } = await useMultiFileAuthState('auth_info')
 const sock = makeWASocket({
     auth: state,
-    syncFullHistory: false,  // skip history sync — bot works immediately
-    aiLabel: true,           // stamp messages with AI bot marker (default: true)
+    // bot-friendly defaults — override only if you need the opposite:
+    //   syncFullHistory: false      (no full history download)
+    //   markOnlineOnConnect: false  (presence is opt-in)
+    //   aiLabel: false             (no AI/biz_bot marker on your messages)
 })
 
 sock.ev.on('creds.update', saveCreds)
 ```
+
+### ⚙️ Defaults (v1.0.28)
+
+These changed to match the bot use case the README always recommended — if you
+relied on the old values, set them explicitly:
+
+| Config | Default | Old default | Why |
+|---|---|---|---|
+| `syncFullHistory` | `false` | `true` | bots rarely need history; it delays startup |
+| `markOnlineOnConnect` | `false` | `true` | presence is opt-in; appearing always-online can look bot-like |
+| `aiLabel` | `false` | `true` | never stamp the `biz_bot` / AI marker unless you ask for it |
+
+Three more options control the v1.0.28 fixes: [`mexQueryIdOverrides`](#-query-ids-rotate--override-them-without-forking)
+(rotated w:mex ids), [`newsletterMediaCompat`](#sending-to-a-channel-newsletter)
+(channel media adaptation) and `classicButtonsInGroups: 'keep'` (disable the
+group/status buttons conversion). See the sections below.
 
 ---
 
@@ -84,7 +102,7 @@ sock.ev.on('creds.update', saveCreds)
 | ⏱️ **Rate Limiter** | Anti-spam pacing calculator: enforces per-minute/hour/day caps, burst allowance, new-chat delays, identical-message dedup |
 | 🖼️ **Album Message** | Send multiple images/videos as a single WA album/grid, with per-item or top-level caption and `gifPlayback` support |
 | 🔘 **Horizontal Buttons** | Modern native-flow buttons that render on ALL clients — text, image, video, GIF headers + classic location map-card style + automatic group conversion |
-| 🤖 **AI Label Config** | `aiLabel: true/false` in socket config — controls whether outgoing messages carry the `biz_bot` attribute that WA uses to render the AI icon |
+| 🤖 **AI Label Config** | `aiLabel: true` (opt-in, default `false`) — stamps outgoing 1:1 messages with the `biz_bot` attribute WA uses to render the AI icon |
 | 🔎 **USync Username Protocol** | Username resolution baked into USync queries — resolve WA usernames alongside contacts in a single round-trip |
 | 📥 **Offline Node Processor** | Batch-processes pending stanzas received while offline, preventing message loss on reconnect |
 | 🔑 **Identity Change Handler** | Dedicated handler for Signal identity key changes — prevents session corruption when a contact re-registers |
@@ -695,6 +713,47 @@ Action buttons (`url` / `copy` / `call`) never send a reply — nothing to handl
 >   (`.menu` → custom image/GIF + buttons + highlighted menu sheet), plus a visual
 >   preview in [`banner-preview.html`](banner-preview.html).
 
+### Dialects, Auto-Upgrades & Known Limits (v1.0.28)
+
+The `buttons` API has two dialects, and **the library picks one for you**:
+
+| Dialect | What it is | Renders as | Use it when |
+|---|---|---|---|
+| `classic` (default) | `ButtonsMessage` | **horizontal row** — proven path, tappable on every client | quick replies, media/location cards |
+| `nativeFlow` | `InteractiveMessage.nativeFlowMessage` | vertical card / sheets / CTA buttons | `rows`/`sections`, `url`, `copy`, `call`, or `dialect: 'nativeFlow'` |
+
+```javascript
+// force a dialect (both optional — 'auto' is the default)
+await sock.sendMessage(jid, { image, caption: 'Pick one', buttons, dialect: 'classic' })
+await sock.sendMessage(jid, { text: 'Pick one',    buttons, dialect: 'nativeFlow' })
+```
+
+**Auto-upgrade is now visible.** A classic card that carries a `url`/`copy`/`call`
+action or a `rows`/`sections` sheet cannot be a `ButtonsMessage`, so the whole
+message is upgraded to a native-flow card. That used to happen silently (bot menus
+"just stopped working"); it now logs:
+
+- `buttons: auto-upgrading to a native-flow interactive card …` — pick `dialect: 'classic'` to make it a hard error instead.
+- `group/status target: converting classic buttons/list/template to a native-flow interactive card` — classic buttons never render in groups. Disable with `makeWASocket({ classicButtonsInGroups: 'keep' })` if you really want them sent raw.
+- `buttonsMessage: native-flow extras found inside a classic card …` — cantarella/Case X raw menus.
+
+**Limits worth knowing (classic dialect):**
+
+| Limit | Behaviour |
+|---|---|
+| 3 quick replies | WhatsApp renders at most **3** in a horizontal row; extra ones are dropped by the client |
+| header required | text-only cards get an **invisible 1×1 PNG image header** (automatic) so the row renders instead of "version doesn't support it" |
+| groups / status | classic buttons are **not rendered** — auto-converted to native flow (logged) |
+| media + text | pass `caption` for the image/video text and/or `text` for the body; both are now mirrored onto the header (before v1.0.28 a `caption`-only send lost its text) |
+
+**Native-flow quick replies — device caveat.** `quick_reply` buttons inside a
+native-flow card (`dialect: 'nativeFlow'`, or the raw `interactiveMessage` shape)
+are **not tappable on every client**, and never in **self-chat / "message
+yourself"** — WhatsApp disables reply buttons on messages you sent to yourself.
+That is why `classic` is the default and why the library logs a warning when you
+force native flow for plain quick replies. Test on a second device, not self-chat.
+`cta_*` buttons are tappable everywhere.
+
 ### Base Compatibility — cantarella / Case X Style Code (v1.0.27+)
 
 Code copied from other Baileys bases (cantarella-baileys, Case X Plugin YOUHU MD, etc.)
@@ -747,6 +806,100 @@ await sock.sendMessage(jid, { interactiveMessage: { buttons: [{ name: 'quick_rep
 automatic invisible-PNG header when you omit one. Flow params are accepted as
 `paramsJson` or `buttonParamsJson`, and `single_select` / `cta_url` / `cta_copy` /
 `cta_call` / `quick_reply` names are preserved as-is.
+
+---
+
+## 📣 Channels (Newsletter) — API, Media & Query-ID Maintenance
+
+Everything channel-related goes through WhatsApp's **w:mex** (GraphQL) endpoint.
+Since v1.0.28 there is **one** query-id table (`lib/Types/Mex.js`); the socket no
+longer keeps a shadow copy (that copy was missing `SUBSCRIBED`, so
+`newsletterSubscribed()` sent `query_id: undefined` and the server answered with a
+binary body — the source of the `"… is not valid JSON"` crashes).
+
+### Reading channels
+
+```javascript
+// resolve an invite link / code (or a jid) — always parsed, never raw
+const meta = await sock.newsletterMetadata('invite', '0029VaAbCdEf')
+// { id, state, name, description, picture, preview, invite, handle,
+//   subscribers, verification, creation_time, reaction_codes, viewer_metadata }
+
+// everything this account follows (parsed; null / deleted entries skipped)
+const channels = await sock.newsletterSubscribed()
+const sameThing = await sock.newsletterFetchAllSubscribe()   // alias other forks use
+
+// followers of a channel
+const followers = await sock.newsletterSubscribers(channelJid, 50)
+
+await sock.newsletterFollow(channelJid)
+await sock.newsletterUnfollow(channelJid)
+await sock.newsletterMute(channelJid)        // newsletterUnmute() to undo
+await sock.newsletterAdminCount(channelJid)
+```
+
+**Guarantees since v1.0.28**
+
+- A channel without a description / picture / settings no longer throws — every field is optional.
+- An unknown or deleted channel throws `404 "Channel not found"` (WA Web behaviour) instead of a `TypeError`.
+- `viewer_metadata.role` is only filled when the server actually reports it:
+  `view_role` is **not** pinned to `GUEST` any more, so "am I admin?" is answerable.
+- Updating name/description/picture throws `502` if the server returns no
+  confirmation, instead of pretending the rename worked.
+- Errors are typed `Boom`s — a rotated id says so explicitly, with the query id
+  and the override hint (no more bare `GraphQL server error: Bad Request`).
+
+### Sending to a channel (`@newsletter`)
+
+`sendMessage(jid, …)` detects `@newsletter` and adapts the payload, because the
+channel service rejects several shapes that are fine for users/groups:
+
+| Payload | Users / groups | Channels | What the library does |
+|---|---|---|---|
+| `ptt: true` voice note | ✅ | ❌ rejected/hidden | **auto-converted** to channel audio: `ptt:false`, `audio/ogg; codecs=opus`, `fileName: audio.ogg`, `seconds` |
+| image/video with `jpegThumbnail` | ✅ needs it | ❌ refused | thumbnail **stripped** at send time |
+| video with `gifPlayback: true` | ✅ | ❌ "Bad Request" | flag **dropped** → sent as a normal video (logged) |
+| text / image / video / document / sticker | ✅ | ✅ | untouched |
+
+The conversion is logged (`channel target: …`). Disable it entirely, or per flag:
+
+```javascript
+makeWASocket({
+    auth: state,
+    newsletterMediaCompat: false,                   // send raw, no adaptation
+    // or: newsletterMediaCompat: { stripThumbnail: false }
+})
+```
+
+### 🌐 Query IDs rotate — override them without forking
+
+WhatsApp rotates the numeric `query_id`s. When one goes stale the server answers
+with a legacy/binary body instead of JSON. Instead of patching the library:
+
+```javascript
+makeWASocket({
+    auth: state,
+    mexQueryIdOverrides: {
+        METADATA:   '6563316087068696',   // enum name from Types/Mex.js
+        SUBSCRIBED: '6388546374527196',
+        JOB_MUTATION: '7150902998257522',
+        SUBSCRIBERS: '9800646650009898'
+    }
+})
+```
+
+- Keys are `QueryIds` enum names (`METADATA`, `SUBSCRIBED`, `SUBSCRIBERS`, `FOLLOW`,
+  `UNFOLLOW`, `MUTE`, `UNMUTE`, `CREATE`, `JOB_MUTATION`, `ADMIN_COUNT`,
+  `CHANGE_OWNER`, `DEMOTE`, `DELETE`) — raw numeric ids pass through unchanged.
+- `mexQueryIdOverrides` also applies to the username socket (ids rotate there too).
+- `XWAPaths` and `QueryIds` are exported from the package root, so you can log or
+  inspect exactly what will be sent.
+- The ids shipped in v1.0.28 were cross-checked against
+  `tulir/whatsmeow` main (`newsletter.go`) and `WhiskeySockets/Baileys` master;
+  each entry in `Types/Mex.js` is annotated with its source. `SUBSCRIBERS` was
+  corrected to `9800646650009898` (the old `9783111038412085` is stale).
+- CI guards this with fixture tests (`test/newsletter-mex.test.mjs`) that parse
+  real metadata / subscribed payloads and assert there is no second id table.
 
 ---
 
@@ -906,6 +1059,44 @@ sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
 | Unknown | unknown | ✅ | 15 s |
 
 > **Important:** Code 515 (`restartRequired`) is WhatsApp's normal post-pairing signal. ishumdz-bail correctly treats it as recoverable with 0 ms backoff — other forks incorrectly mark it as fatal, causing bots to stop after first pair.
+
+### 🔁 Retries, `getMessage` and "Waiting for this message"
+
+WhatsApp allows a recipient's device to ask your bot to **re-send** a message it
+could not decrypt (retry receipts). If your bot cannot produce the original
+message, the recipient keeps seeing **"Waiting for this message. This may take a
+while."** — forever.
+
+```javascript
+import { makeWASocket, proto } from 'ishumdz-bail'
+
+const sock = makeWASocket({
+    auth: state,
+    // REQUIRED for retries: return the original message by key, or undefined
+    getMessage: async (key) => {
+        const stored = await db.get(key.id)              // your own store
+        return stored ? proto.Message.decode(stored) : undefined
+    }
+})
+```
+
+Notes:
+
+- `getMessage` defaults to `async () => undefined` — i.e. **no retry support** until you implement it. Bots that only send (never receive) are fine.
+- Store messages in `messages.upsert` (`store: () => msg.message` is enough for a simple in-memory cache).
+- Retries are capped by `maxMsgRetryCount` (default 5); this fork ships a
+  `MessageRetryManager` with a 1-hour cache TTL (`DEFAULT_CACHE_TTLS.MSG_RETRY`).
+
+### 🪪 Self-chat (`@lid`) addressing caveat
+
+If a bot uses its **own** number as a chat ("message yourself" / `.menu` in your own
+inbox), the chat may be addressed as `@lid` while your credentials are keyed by
+phone number (`@s.whatsapp.net`). Symptoms: messages look sent but never arrive in
+self-chat, or come back as a retry loop. Workarounds:
+
+- Prefer sending to the resolved PN jid (`sock.user.id`) when the target is yourself.
+- `noSelfSync` sends do **not** address `@lid` self-chat reliably in every version — if you rely on it, verify on a real device.
+- Buttons sent to self-chat are **never tappable** (see the buttons caveat above) — this is a WhatsApp limitation, not a library bug.
 
 ---
 
